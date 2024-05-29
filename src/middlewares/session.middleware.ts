@@ -1,9 +1,11 @@
-import { CookieOptions, RequestHandler as MiddleWare } from "express";
+import { CookieOptions, RequestHandler as MiddleWare, Request } from "express";
 import { parse } from "cookie";
-import { decrypt } from "@/utils/helper";
+import { decrypt, encrypt } from "@/utils/helper";
 import { redisClient } from "@/redis/connection";
+import crypto from "crypto";
+import { getData, setData } from "@/redis/cache";
 interface SessionData {
-  cookie: Omit<CookieOptions, "encode"> | undefined;
+  cookie: CookieOptions;
   user?: { id: string };
 }
 declare global {
@@ -19,118 +21,80 @@ interface SessionOptions {
   secret: string;
   redis_uri: string;
   name?: string | undefined;
-  cookie?: Omit<CookieOptions, "encode"> | undefined;
+  prefix?: string;
+  cookie?: CookieOptions | undefined;
+  genId?: (request: Request) => string;
+}
+
+function genIdDefault(req: Request) {
+  const randomId = crypto.randomBytes(10).toString("hex");
+  return randomId;
 }
 
 const cookieDefault: CookieOptions = {
   path: "/",
   httpOnly: true,
   secure: false,
-  maxAge: undefined,
 };
 
 export const session =
-  ({ name = "session", secret, cookie }: SessionOptions): MiddleWare =>
+  ({
+    name = "session",
+    secret,
+    cookie,
+    prefix = "sid",
+    genId = genIdDefault,
+  }: SessionOptions): MiddleWare =>
   async (req, res, next) => {
-    let sessionData;
+    const cookieOpt: CookieOptions = {
+      ...cookieDefault,
+      ...cookie,
+    };
+
+    let sessionData: SessionData = {
+      cookie: cookieOpt,
+    };
+
     const cookies = parse(req.get("cookie") || "");
     if (cookies[name]) {
-      console.log("isAuth:true");
-
-      req.sessionID = decrypt(cookies["session"], "123");
-      const data = await redisClient.get(req.sessionID);
-
-      sessionData = new Proxy<SessionData>(
-        data
-          ? JSON.parse(data)
-          : {
-              cookie: { ...cookieDefault, ...cookie },
-            },
-        {
-          get(target, p, receiver) {
-            return target[p as keyof SessionData];
-          },
-          set(target, p, newValue, receiver) {
-            target[p as keyof SessionData] = newValue;
-            if (p == "user" && target[p]) {
-              res.cookie("sessionId", "1312312312", {
-                httpOnly: true,
-                secure: true,
-              });
-            }
-            return true;
-          },
-        }
-      );
-    } else {
-      console.log("isAuth:false");
-
-      sessionData = new Proxy<SessionData>(
-        {
-          cookie: { ...cookieDefault, ...cookie },
-        },
-        {
-          get(target, p, receiver) {
-            return target[p as keyof SessionData];
-          },
-          set(target, p, newValue, receiver) {
-            target[p as keyof SessionData] = newValue;
-            if (p == "user" && target[p]) {
-              res.cookie("sessionId", "1312312312", {
-                httpOnly: true,
-                secure: true,
-              });
-            }
-            return true;
-          },
-        }
-      );
+      const sessionId = decrypt(cookies[name], secret);
+      const cookieRedis = await getData(sessionId);
+      if (cookieRedis) {
+        sessionData = JSON.parse(cookieRedis);
+      }
     }
-    req.session = sessionData;
-    // const session = new Proxy<Session>(
-    //   { isAuth: false },
-    //   {
-    //     set(target, property, value) {
-    //       target[property as keyof Session] = value;
-    //       if (property == "isAuth" && target[property]) {
-    //         res.cookie("sessionId", "1312312312", {
-    //           httpOnly: true,
-    //           secure: true,
-    //         });
-    //       }
 
-    //       return true;
-    //     },
-    //     get(target, property) {
-    //       return target[property as keyof Session];
-    //     },
-    //   }
-    // );
-    // req.session = session;
-    // const cookieHeader = req.get("cookie") || "";
-    // const cookies = cookieaa.parse(cookieHeader);
-    // if (cookies["session"]) {
-    // }
-    // if (req.isAuth)
-    //   res.cookie("session1", `${req.isAuth}`, {
-    //     ...cookieDefault,
-    //     ...cookie,
-    //   });
+    const cookieProxy = new Proxy<CookieOptions>(sessionData.cookie, {
+      set(target, p: keyof CookieOptions, newValue, receiver) {
+        if (p == "expires") {
+          delete target["maxAge"];
+        } else if (p == "maxAge") {
+          delete target["expires"];
+        }
+        target[p] = newValue;
+        req.sessionID = req.sessionID || `${prefix}:${genId(req)}`;
+        res.cookie(name, encrypt(req.sessionID, secret), target);
+        // fix here
+        // setData(req.sessionID,JSON.stringify(req.session),target["expires"] ? Math.abs(new Date()) )
+        return true;
+      },
+    });
 
-    // const data = new Proxy(
-    //   { isAuth: false },
-    //   {
-    //     get(target, p, receiver) {
-    //       return target;
-    //     },
-    //     set(target, p, newValue, receiver) {
-    //       target["isAuth"] = newValue;
-    //       return true;
-    //     },
-    //   }
-    // );
+    req.session = new Proxy<SessionData>(
+      {
+        cookie: cookieProxy,
+      },
+      {
+        set(target, p: keyof SessionData, newValue, receiver) {
+          target[p] = newValue;
+          req.sessionID = req.sessionID || `${prefix}:${genId(req)}`;
+          res.cookie(name, encrypt(req.sessionID, secret), target.cookie);
 
-    // req.session = data;
+          return true;
+        },
+      }
+    );
 
+    console.log(req.session);
     next();
   };

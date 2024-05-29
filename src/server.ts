@@ -10,7 +10,7 @@ import { StatusCodes } from "http-status-codes";
 import { appRouter } from "./router";
 import { initRedis } from "./redis/connection";
 import { session } from "./middlewares/session.middleware";
-
+import crypto from "crypto";
 const SERVER_PORT = 4000;
 export class RedisSessionServer {
   private app: Application;
@@ -41,13 +41,17 @@ export class RedisSessionServer {
     initRedis();
     app.use(
       session({
-        secret: "dsadasdsaa",
+        secret: configs.SESSION_SECRET,
         redis_uri: "",
         cookie: {
           httpOnly: true,
           secure: process.env.NODE_ENV == "production",
 
           // maxAge: SESSION_MAX_AGE,
+        },
+        genId: (req) => {
+          const randomId = crypto.randomBytes(10).toString("hex");
+          return `${req.session.user?.id}:${randomId}`;
         },
       })
     );
